@@ -1,0 +1,106 @@
+name: Build and release
+
+on: push
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        build-os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - build-os: ubuntu-latest
+            pre-build: sudo apt-get update && sudo apt-get install gcc libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libx11-dev xorg-dev
+            build: |
+                    go build -ldflags="-w -s" -o HEXUploader ./gui/
+            post-build: echo None
+            archive-cmd: |
+                          chmod +x HEXUploader
+                          zip HEXUploader_linux.zip HEXUploader
+
+          - build-os: windows-latest
+            pre-build: echo None
+            build: |
+                    go build -ldflags="-w -s" -o HEXUploader.exe ./gui/
+            post-build: echo None
+            archive-cmd: |
+                          powershell Compress-Archive HEXUploader.exe HEXUploader_windows.zip
+
+          - build-os: macos-latest
+            pre-build: echo None
+            build: |
+                    go build -ldflags="-w -s" -o HEXUploader ./gui/
+            post-build: |
+                        go install "fyne.io/fyne/v2/cmd/fyne@latest"
+                        ver=$(grep "APP_VERSION" state/state.go |cut -d '"' -f 2 |tr -d 'v')
+                        fyne package --executable HEXUploader --appVersion $ver --appID com.wingnuttech.HEXUploader
+            archive-cmd: |
+                          zip -r HEXUploader_mac.zip HEXUploader.app
+                          
+    runs-on: ${{ matrix.build-os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v3
+        with:
+          go-version: 1.20.x
+
+      - name: Pre-build
+        run: ${{ matrix.pre-build }}
+      
+      - name: Build apps
+        run: ${{ matrix.build }}
+      
+      - name: Post-build
+        run: ${{ matrix.post-build }}
+      
+      - name: Compress
+        run: ${{ matrix.archive-cmd }}
+        
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: build
+          path: HEXUploader*.zip
+
+  check_version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chackout
+        uses: actions/checkout@v3
+
+      - name: Check version
+        run: |
+              git fetch --tags
+              file_ver=$(awk -F'"' '/APP_VERSION/ {print $2}' state/state.go)
+              ch_ver=$(awk -F'[][]' '/\[v[0-9.]+\]/ {print $2; exit}' CHANGELOG.md)
+              git_tags=$(git describe --tags --always $(git rev-list --tags))
+
+              echo "Latest git tag:    ${git_tags%%$'\n'*}"
+              echo "File version:      ${file_ver}"
+              echo "Changelog version: ${ch_ver}"
+
+              if [[ $file_ver != $ch_ver || $git_tags =~ $file_ver ]]; then echo "Version issue!"; exit 1; fi
+
+  release:
+    needs: [build, check_version]
+    if: ${{ github.ref_name == 'main' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/download-artifact@v3
+
+      - name: Generate changelog
+        run: awk '/^## / {if (p) {exit}; {p=1}} p' CHANGELOG.md > latest-CHANGELOG.md
+
+      - name: Get version
+        run: echo "version=$(awk -F'\"' '/APP_VERSION/ {print $2}' state/state.go)" >> $GITHUB_ENV
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.version }}
+          body_path: latest-CHANGELOG.md
+          files: build/*
